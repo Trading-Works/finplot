@@ -40,6 +40,7 @@ odd_plot_background = '#fff'
 candle_bull_color = '#26a69a'
 candle_bear_color = '#ef5350'
 candle_bull_body_color = background
+candle_shadow_width = 1
 volume_bull_color = '#92d2cc'
 volume_bear_color = '#f7a9a7'
 volume_bull_body_color = volume_bull_color
@@ -868,16 +869,16 @@ class FinViewBox(pg.ViewBox):
             x0 = tr.left()
             x1 = tr.right()
         # make edges rigid
-        xl = max(round(x0-side_margin)+side_margin, -side_margin)
-        xr = min(round(x1-side_margin)+side_margin, datasrc.xlen-side_margin)
+        xl = max(_round(x0-side_margin)+side_margin, -side_margin)
+        xr = min(_round(x1-side_margin)+side_margin, datasrc.xlen-side_margin)
         dxl = xl-x0
         dxr = xr-x1
         if dxl > 0:
             x1 += dxl
         if dxr < 0:
             x0 += dxr
-        x0 = max(round(x0-side_margin)+side_margin, -side_margin)
-        x1 = min(round(x1-side_margin)+side_margin, datasrc.xlen-side_margin)
+        x0 = max(_round(x0-side_margin)+side_margin, -side_margin)
+        x1 = min(_round(x1-side_margin)+side_margin, datasrc.xlen-side_margin)
         # fetch hi-lo and set range
         _,_,hi,lo,cnt = datasrc.hilo(x0, x1)
         vr = self.viewRect()
@@ -1021,7 +1022,7 @@ class CandlestickItem(FinPlotItem):
         self.draw_body = draw_body
         self.draw_shadow = draw_shadow
         self.candle_width = candle_width
-        self.shadow_width = 1
+        self.shadow_width = candle_shadow_width
         self.colorfunc = colorfunc
         self.x_offset = 0
         super().__init__(ax, datasrc, lod=True)
@@ -1664,8 +1665,10 @@ def set_time_inspector(inspector, ax=None, when='click'):
     win = ax.vb.win
     if when == 'hover':
         win.proxy_hover = pg.SignalProxy(win.scene().sigMouseMoved, rateLimit=15, slot=partial(_inspect_pos, ax, inspector))
+    elif when in ('dclick', 'double-click'):
+        win.proxy_dclick = pg.SignalProxy(win.scene().sigMouseClicked, slot=partial(_inspect_clicked, ax, inspector, True))
     else:
-        win.proxy_click = pg.SignalProxy(win.scene().sigMouseClicked, slot=partial(_inspect_clicked, ax, inspector))
+        win.proxy_click = pg.SignalProxy(win.scene().sigMouseClicked, slot=partial(_inspect_clicked, ax, inspector, False))
 
 
 def add_crosshair_info(infofunc, ax=None):
@@ -2341,8 +2344,8 @@ def _wheel_event_wrapper(self, orig_func, ev):
     orig_func(self, ev)
 
 
-def _inspect_clicked(ax, inspector, evs):
-    if evs[-1].accepted:
+def _inspect_clicked(ax, inspector, when_double_click, evs):
+    if evs[-1].accepted or when_double_click != evs[-1].double():
         return
     pos = evs[-1].scenePos()
     return _inspect_pos(ax, inspector, (pos,))
@@ -2515,7 +2518,8 @@ def _round_to_significant(rng, rngmax, x, significant_decimals, significant_eps)
     if is_highres and abs(x)>0:
         exp10 = floor(np.log10(abs(x)))
         x = x / (10**exp10)
-        sd = min(3, sd+int(abs(np.log10(rngmax))))
+        rm = int(abs(np.log10(rngmax))) if rngmax>0 else 0
+        sd = min(3, sd+rm)
         fmt = '%%%i.%ife%%i' % (sd, sd)
         r = fmt % (x, exp10)
     else:
@@ -2542,7 +2546,7 @@ def _clamp_xy(ax, x, y):
         ds = ax.vb.datasrc
         if x < 0 or (ds and x > len(ds.df)-1):
             x = 0 if x < 0 else len(ds.df)-1
-        x = round(x)
+        x = _round(x)
         eps = ax.significant_eps
         if eps > 1e-8:
             eps2 = np.sign(y) * 0.5 * eps
@@ -2644,6 +2648,10 @@ def _makepen(color, style=None, width=1):
     return pg.mkPen(color=color, style=QtCore.Qt.CustomDashLine, dash=dash, width=width)
 
 
+def _round(v):
+    return ceil(v-0.5)
+
+
 try:
     qtver = '%d.%d' % (QtCore.QT_VERSION//256//256, QtCore.QT_VERSION//256%256)
     if qtver not in ('5.9', '5.13') and [int(i) for i in pg.__version__.split('.')] <= [0,11,0]:
@@ -2663,6 +2671,7 @@ try:
     user32 = ctypes.windll.user32
     user32.SetProcessDPIAware()
     lod_candles = int(user32.GetSystemMetrics(0) * 1.6)
+    candle_shadow_width = int(user32.GetSystemMetrics(0) // 2100 + 1) # 2560 and resolutions above -> wider shadows
 except:
     pass
 
