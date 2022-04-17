@@ -21,8 +21,7 @@ from functools import lru_cache
 import json
 from math import nan
 import pandas as pd
-from PyQt5.QtWidgets import QComboBox, QCheckBox, QWidget
-from pyqtgraph import QtGui
+from PyQt5.QtWidgets import QComboBox, QCheckBox, QWidget, QGridLayout
 import pyqtgraph as pg
 import requests
 from time import time as now, sleep
@@ -81,11 +80,11 @@ class BinanceFutureWebsocket:
             print('websocket subscribe error:', type(e), e)
             raise e
 
-    def on_message(self, ws, msg):
+    def on_message(self, *args, **kwargs):
         df = self.df
         if df is None:
             return
-        msg = json.loads(msg)
+        msg = json.loads(args[-1])
         if 'stream' not in msg:
             return
         stream = msg['stream']
@@ -259,6 +258,7 @@ def change_asset(*args, **kwargs):
 
     symbol = ctrl_panel.symbol.currentText()
     interval = ctrl_panel.interval.currentText()
+    ws.close()
     ws.df = None
     df = load_price_history(symbol, interval=interval)
     ws.reconnect(symbol, interval, df)
@@ -379,7 +379,7 @@ def create_ctrl_panel(win):
     panel = QWidget(win)
     panel.move(100, 0)
     win.scene().addWidget(panel)
-    layout = QtGui.QGridLayout(panel)
+    layout = QGridLayout(panel)
 
     panel.symbol = QComboBox(panel)
     [panel.symbol.addItem(i+'USDT') for i in 'BTC ETH XRP DOGE BNB SOL ADA LTC LINK DOT TRX BCH'.split()]
