@@ -9,7 +9,7 @@ from time import time
 
 # load data and convert date
 end_t = int(time()) 
-start_t = end_t - 12*30*24*60*60 # twelve months
+start_t = end_t - 24*30*24*60*60 # 24 months
 symbol = 'SPY'
 interval = '1d'
 url = 'https://query1.finance.yahoo.com/v7/finance/download/%s?period1=%s&period2=%s&interval=%s&events=history' % (symbol, start_t, end_t, interval)
@@ -28,7 +28,7 @@ fplt.plot(macd, ax=ax2, legend='MACD')
 fplt.plot(signal, ax=ax2, legend='Signal')
 
 # change to b/w coloring templates for next plots
-fplt.candle_bull_color = fplt.candle_bear_color = '#000'
+fplt.candle_bull_color = fplt.candle_bear_color = fplt.candle_bear_body_color = '#000'
 fplt.volume_bull_color = fplt.volume_bear_color = '#333'
 fplt.candle_bull_body_color = fplt.volume_bull_body_color = '#fff'
 

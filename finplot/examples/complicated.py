@@ -21,7 +21,7 @@ from functools import lru_cache
 import json
 from math import nan
 import pandas as pd
-from PyQt5.QtWidgets import QComboBox, QCheckBox, QWidget, QGridLayout
+from PyQt6.QtWidgets import QComboBox, QCheckBox, QWidget, QGridLayout
 import pyqtgraph as pg
 import requests
 from time import time as now, sleep
@@ -106,7 +106,7 @@ class BinanceFutureWebsocket:
                 data = [t] + [float(k[i]) for i in ['o','c','h','l','v']]
                 candle = pd.DataFrame([data], columns='Time Open Close High Low Volume'.split()).astype({'Time':'datetime64[ms]'})
                 candle.set_index('Time', inplace=True)
-                self.df = df.append(candle)
+                self.df = pd.concat([df, candle])
 
     def on_error(self, error, *args, **kwargs):
         print('websocket error: %s' % error)
@@ -346,8 +346,8 @@ def dark_mode_toggle(dark):
     axs += fplt.overlay_axs
     axis_pen = fplt._makepen(color=fplt.foreground)
     for ax in axs:
-        ax.axes['left']['item'].setPen(axis_pen)
-        ax.axes['left']['item'].setTextPen(axis_pen)
+        ax.axes['right']['item'].setPen(axis_pen)
+        ax.axes['right']['item'].setTextPen(axis_pen)
         ax.axes['bottom']['item'].setPen(axis_pen)
         ax.axes['bottom']['item'].setTextPen(axis_pen)
         if ax.crosshair is not None:
@@ -407,7 +407,7 @@ def create_ctrl_panel(win):
 
     panel.darkmode = QCheckBox(panel)
     panel.darkmode.setText('Haxxor mode')
-    panel.darkmode.setCheckState(2)
+    panel.darkmode.setCheckState(pg.Qt.QtCore.Qt.CheckState.Checked)
     panel.darkmode.toggled.connect(dark_mode_toggle)
     layout.addWidget(panel.darkmode, 0, 6)
 
