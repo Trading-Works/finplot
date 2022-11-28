@@ -207,9 +207,11 @@ class YAxisItem(pg.AxisItem):
         if any(['e' in g for g in gs]):
             maxdec = max([len((g).partition('.')[2].partition('e')[0]) for g in gs if 'e' in g])
             self.next_fmt = '%%.%ie' % maxdec
-        else:
+        elif gs:
             maxdec = max([len((g).partition('.')[2]) for g in gs])
             self.next_fmt = '%%.%if' % maxdec
+        else:
+            self.next_fmt = '%g'
         return vs
 
 
@@ -1857,8 +1859,9 @@ def show(qt_exec=True):
 
 def play_sound(filename):
     if filename not in sounds:
-        from PyQt5.QtMultimedia import QSound
-        sounds[filename] = QSound(filename) # disallow gc
+        from PyQt6.QtMultimedia import QSoundEffect
+        s = sounds[filename] = QSoundEffect() # disallow gc
+        s.setSource(QtCore.QUrl.fromLocalFile(filename))
     s = sounds[filename]
     s.play()
 
