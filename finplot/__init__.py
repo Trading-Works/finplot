@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from dateutil.tz import tzlocal
 from decimal import Decimal
 from functools import partial, partialmethod
+from finplot.live import Live
 from math import ceil, floor, fmod
 import numpy as np
 import os.path
@@ -54,6 +55,7 @@ draw_line_color = '#000'
 draw_done_color = '#555'
 significant_decimals = 8
 significant_eps = 1e-8
+max_decimals = 10
 max_zoom_points = 20 # number of visible candles when maximum zoomed in
 top_graph_scale = 2
 clamp_grid = True
@@ -245,7 +247,7 @@ class PandasDataSource:
        Volume bars: create with three columns: time, open, close, volume - in that order.
        For all other types, time needs to be first, usually followed by one or more Y-columns.'''
     def __init__(self, df):
-        if type(df.index) == pd.DatetimeIndex or df.index[-1]>1e7 or '.RangeIndex' not in str(type(df.index)):
+        if type(df.index) == pd.DatetimeIndex or df.index[-1]>1e8 or '.RangeIndex' not in str(type(df.index)):
             df = df.reset_index()
         self.df = df.copy()
         # manage time column
@@ -312,26 +314,59 @@ class PandasDataSource:
     def xlen(self):
         return len(self.df)
 
-    def calc_significant_decimals(self):
-        ser = self.z if len(self.scale_cols)>1 else self.y
-        absdiff = ser.diff().abs()
-        absdiff[absdiff<1e-30] = 1e30
-        num = smallest_diff = absdiff.min()
-        for _ in range(2):
-            s = '%e' % num
+    def calc_significant_decimals(self, full):
+        def float_round(f):
+            return float('%.3e'%f) # 0.00999748 -> 0.01
+        def remainder_ok(a, b):
+            c = a % b
+            if c / b > 0.98: # remainder almost same as denominator
+                c = abs(c-b)
+            return c < b*0.6 # half is fine
+        def calc_sd(ser):
+            ser = ser.iloc[:1000]
+            absdiff = ser.diff().abs()
+            absdiff[absdiff<1e-30] = 1e30
+            smallest_diff = absdiff.min()
+            if smallest_diff > 1e29: # just 0s?
+                return 0
+            smallest_diff = float_round(smallest_diff)
+            absser = ser.iloc[:100].abs()
+            for _ in range(2): # check if we have a remainder that is a better epsilon
+                remainder = [fmod(v,smallest_diff) for v in absser]
+                remainder = [v for v in remainder if v>smallest_diff/20]
+                if not remainder:
+                    break
+                smallest_diff_r = min(remainder)
+                if smallest_diff*0.05 < smallest_diff_r < smallest_diff * 0.7 and remainder_ok(smallest_diff, smallest_diff_r):
+                    smallest_diff = smallest_diff_r
+                else:
+                    break
+            return smallest_diff
+        def calc_dec(ser, smallest_diff):
+            if not full: # line plots usually have extreme resolution
+                absmax = ser.iloc[:300].abs().max()
+                s = '%.3e' % absmax
+            else: # candles
+                s = '%.2e' % smallest_diff
             base,_,exp = s.partition('e')
             base = base.rstrip('0')
             exp = -int(exp)
             max_base_decimals = min(5, -exp+2) if exp < 0 else 3
             base_decimals = max(0, min(max_base_decimals, len(base)-2))
             decimals = exp + base_decimals
-            decimals = max(0, min(10, decimals))
-            if decimals <= 3:
-                break
-            # retry with full number, to see if we can get the number of decimals down
-            num = smallest_diff + abs(ser.min())
-        smallest_diff = max(10**(-decimals), smallest_diff)
-        return decimals, smallest_diff
+            decimals = max(0, min(max_decimals, decimals))
+            if not full: # apply grid for line plots only
+                smallest_diff = max(10**(-decimals), smallest_diff)
+            return decimals, smallest_diff
+        # first calculate EPS for series 0&1, then do decimals
+        sds = [calc_sd(self.y)] # might be all zeros for bar charts
+        if len(self.scale_cols) > 1:
+            sds.append(calc_sd(self.z)) # if first is open, this might be close
+        sds = [sd for sd in sds if sd>0]
+        big_diff = max(sds)
+        smallest_diff = min([sd for sd in sds if sd>big_diff/100]) # filter out extremely small epsilons
+        ser = self.z if len(self.scale_cols) > 1 else self.y
+        return calc_dec(ser, smallest_diff)
 
     def update_init_x(self, init_steps):
         self.init_x0, self.init_x1 = _xminmax(self, x_indexed=True, init_steps=init_steps)
@@ -407,7 +442,7 @@ class PandasDataSource:
                 output_df = output_df.loc[input_df.index[start_idx:end_idx], :]
         output_df = self.post_update(output_df)
         output_df = output_df.reset_index()
-        self.df = output_df[[output_df.columns[0]]+orig_cols] if orig_cols else input_df
+        self.df = output_df[[output_df.columns[0]]+orig_cols] if orig_cols else output_df
         self.init_x1 = self.xlen + right_margin_candles - side_margin
         self.cache_hilo = OrderedDict()
         self._period = self._smooth_time = None
@@ -1463,7 +1498,7 @@ def horizvol_colorfilter(sections=[]):
 
 def candlestick_ochl(datasrc, draw_body=True, draw_shadow=True, candle_width=0.6, ax=None, colorfunc=price_colorfilter):
     ax = _create_plot(ax=ax, maximize=False)
-    datasrc = _create_datasrc(ax, datasrc)
+    datasrc = _create_datasrc(ax, datasrc, ncols=5)
     datasrc.scale_cols = [3,4] # only hi+lo scales
     _set_datasrc(ax, datasrc)
     item = CandlestickItem(ax=ax, datasrc=datasrc, draw_body=draw_body, draw_shadow=draw_shadow, candle_width=candle_width, colorfunc=colorfunc)
@@ -1476,7 +1511,7 @@ def candlestick_ochl(datasrc, draw_body=True, draw_shadow=True, candle_width=0.6
 
 def renko(x, y=None, bins=None, step=None, ax=None, colorfunc=price_colorfilter):
     ax = _create_plot(ax=ax, maximize=False)
-    datasrc = _create_datasrc(ax, x, y)
+    datasrc = _create_datasrc(ax, x, y, ncols=3)
     origdf = datasrc.df
     adj = _adjust_renko_log_datasrc if ax.vb.yscale.scaletype == 'log' else _adjust_renko_datasrc
     step_adjust_renko_datasrc = partial(adj, bins, step)
@@ -1493,7 +1528,7 @@ def renko(x, y=None, bins=None, step=None, ax=None, colorfunc=price_colorfilter)
 
 def volume_ocv(datasrc, candle_width=0.8, ax=None, colorfunc=volume_colorfilter):
     ax = _create_plot(ax=ax, maximize=False)
-    datasrc = _create_datasrc(ax, datasrc)
+    datasrc = _create_datasrc(ax, datasrc, ncols=4)
     _adjust_volume_datasrc(datasrc)
     _set_datasrc(ax, datasrc)
     item = CandlestickItem(ax=ax, datasrc=datasrc, draw_body=True, draw_shadow=False, candle_width=candle_width, colorfunc=colorfunc)
@@ -1580,7 +1615,7 @@ def bar(x, y=None, width=0.8, ax=None, colorfunc=strength_colorfilter, **kwargs)
     max_zoom_points = min(max_zoom_points, 8)
     ax = _create_plot(ax=ax, maximize=False)
     ax.decouple()
-    datasrc = _create_datasrc(ax, x, y)
+    datasrc = _create_datasrc(ax, x, y, ncols=1)
     _adjust_bar_datasrc(datasrc, order_cols=False) # don't rearrange columns, done for us in volume_ocv()
     item = volume_ocv(datasrc, candle_width=width, ax=ax, colorfunc=colorfunc)
     item.update_data = partial(_update_data, None, _adjust_bar_datasrc, item)
@@ -1604,7 +1639,7 @@ def hist(x, bins, ax=None, **kwargs):
 def plot(x, y=None, color=None, width=1, ax=None, style=None, legend=None, zoomscale=True, **kwargs):
     ax = _create_plot(ax=ax, maximize=False)
     used_color = _get_color(ax, style, color)
-    datasrc = _create_datasrc(ax, x, y)
+    datasrc = _create_datasrc(ax, x, y, ncols=1)
     if not zoomscale:
         datasrc.scale_cols = []
     _set_datasrc(ax, datasrc)
@@ -1617,6 +1652,7 @@ def plot(x, y=None, color=None, width=1, ax=None, style=None, legend=None, zooms
     if style is None or any(ch in style for ch in '-_.'):
         connect_dots = 'finite' # same as matplotlib; use datasrc.standalone=True if you want to keep separate intervals on a plot
         item = ax.plot(x, y, pen=_makepen(color=used_color, style=style, width=width), name=legend, connect=connect_dots)
+        item.setClipToView(True)
         item.setDownsampling(auto=True, method='subsample')
         item.setZValue(5)
     else:
@@ -1654,7 +1690,7 @@ def plot(x, y=None, color=None, width=1, ax=None, style=None, legend=None, zooms
 def labels(x, y=None, labels=None, color=None, ax=None, anchor=(0.5,1)):
     ax = _create_plot(ax=ax, maximize=False)
     used_color = _get_color(ax, '?', color)
-    datasrc = _create_datasrc(ax, x, y, labels)
+    datasrc = _create_datasrc(ax, x, y, labels, ncols=3)
     datasrc.scale_cols = [] # don't use this for scaling
     _set_datasrc(ax, datasrc)
     item = ScatterLabelItem(ax=ax, datasrc=datasrc, color=used_color, anchor=anchor)
@@ -1665,6 +1701,12 @@ def labels(x, y=None, labels=None, color=None, ax=None, anchor=(0.5,1)):
     if ax.vb.v_zoom_scale > 0.9: # adjust to make hi/lo text fit
         ax.vb.v_zoom_scale = 0.9
     return item
+
+
+def live(plots=1):
+    if plots == 1:
+        return Live()
+    return [Live() for _ in range(plots)]
 
 
 def add_legend(text, ax=None):
@@ -1825,7 +1867,10 @@ def autoviewrestore(enable=True):
 
 def refresh():
     for win in windows:
-        vbs = [ax.vb for ax in win.axs] + [ax.vb for ax in overlay_axs if ax.vb.win==win]
+        axs = win.axs + [ax for ax in overlay_axs if ax.vb.win==win]
+        for ax in axs:
+            _improve_significants(ax)
+        vbs = [ax.vb for ax in axs]
         for vb in vbs:
             vb.pre_process_data()
         if viewrestore:
@@ -1997,6 +2042,7 @@ def _add_timestamp_plot(master, prev_ax, viewbox, index, yscale):
     ax.axes['right']['item'].setZValue(30) # put axis in front instead of behind data
     ax.axes['bottom']['item'].setZValue(30)
     ax.setLogMode(y=(yscale.scaletype=='log'))
+    ax.significant_forced = False
     ax.significant_decimals = significant_decimals
     ax.significant_eps = significant_eps
     ax.crosshair = FinCrossHair(ax, color=cross_hair_color)
@@ -2032,6 +2078,7 @@ def _ax_overlay(ax, scale=0.25, yaxis=False):
     def updateView():
         viewbox.setGeometry(ax.vb.sceneBoundingRect())
     axo = pg.PlotItem(enableMenu=False)
+    axo.significant_forced = False
     axo.significant_decimals = significant_decimals
     axo.significant_eps = significant_eps
     axo.vb = viewbox
@@ -2099,6 +2146,7 @@ def _ax_reset(ax):
     ax.vb.set_datasrc(None)
     if ax.crosshair is not None:
         ax.crosshair.show()
+    ax.significant_forced = False
 
 
 def _create_legend(ax):
@@ -2115,14 +2163,24 @@ def _update_significants(ax, datasrc, force):
     default_eps = 0.99 < ax.significant_eps/significant_eps < 1.01
     if force or (default_dec and default_eps):
         try:
-            sd,se = datasrc.calc_significant_decimals()
+            sd,se = datasrc.calc_significant_decimals(full=force)
             if sd or se != significant_eps:
-                if force or default_dec or sd > ax.significant_decimals:
+                if (force and not ax.significant_forced) or default_dec or sd > ax.significant_decimals:
                     ax.significant_decimals = sd
-                if force or default_eps or se < ax.significant_eps:
+                    ax.significant_forced |= force
+                if (force and not ax.significant_forced) or default_eps or se < ax.significant_eps:
                     ax.significant_eps = se
+                    ax.significant_forced |= force
         except:
             pass # datasrc probably full av NaNs
+
+
+def _improve_significants(ax):
+    '''Force update of the EPS if we both have no bars/candles AND a log scale.
+       This is intended to fix the lower part of the grid on line plots on a log scale.'''
+    if ax.vb.yscale.scaletype == 'log':
+        if not any(isinstance(item, CandlestickItem) for item in ax.items):
+            _update_significants(ax, ax.vb.datasrc, force=True)
 
 
 def _is_standalone(timeser):
@@ -2134,7 +2192,7 @@ def _create_series(a):
     return a if isinstance(a, pd.Series) else pd.Series(a)
 
 
-def _create_datasrc(ax, *args):
+def _create_datasrc(ax, *args, ncols=-1):
     def do_create(args):
         if len(args) == 1 and type(args[0]) == PandasDataSource:
             return args[0]
@@ -2149,7 +2207,7 @@ def _create_datasrc(ax, *args):
     iargs = [a for a in args if a is not None]
     datasrc = do_create(iargs)
     # check if time column missing
-    if len(datasrc.df.columns) == 1:
+    if len(datasrc.df.columns) in (1, ncols-1):
         # assume time data has already been added before
         for a in ax.vb.win.axs:
             if a.vb.datasrc and len(a.vb.datasrc.df.columns) >= 2:
@@ -2158,7 +2216,10 @@ def _create_datasrc(ax, *args):
                 datasrc.df.insert(0, col, a.vb.datasrc.df[col])
                 datasrc = PandasDataSource(datasrc.df)
                 break
-        if len(datasrc.df.columns) == 1:
+        if len(datasrc.df.columns) in (1, ncols-1):
+            if ncols > 1:
+                print(f"WARNING: this type of plot wants %i columns/args, but you've only supplied %i" % (ncols, len(datasrc.df.columns)))
+                print(' - Assuming time column is missing and using index instead.')
             datasrc = PandasDataSource(datasrc.df.reset_index())
     elif len(iargs) >= 2 and len(datasrc.df.columns) == len(iargs)+1 and len(iargs) == len(args):
         try:
@@ -2166,9 +2227,11 @@ def _create_datasrc(ax, *args):
                 print('WARNING: performance penalty and crash may occur when using int64 instead of range indices.')
                 if (iargs[0].index == range(len(iargs[0]))).all():
                     print(' - Fix by .reset_index(drop=True)')
-                    return _create_datasrc(ax, datasrc.df[datasrc.df.columns[1:]])
+                    return _create_datasrc(ax, datasrc.df[datasrc.df.columns[1:]], ncols=ncols)
         except:
             print('WARNING: input data source may cause performance penalty and crash.')
+
+    assert len(datasrc.df.columns) >= ncols, 'ERROR: too few columns/args supplied for this plot'
 
     if datasrc.period_ns < 0:
         print('WARNING: input data source has time in descending order. Try sort_values() before calling.')
@@ -2763,7 +2826,11 @@ def _draw_line_segment_text(polyline, segment, pos0, pos1):
     if polyline.vb.y_positive:
         y0,y1 = ysc.xform(pos0.y()), ysc.xform(pos1.y())
         if y0:
-            value = '%+.2f %%' % (100 * y1 / y0 - 100)
+            gain = y1 / y0 - 1
+            if gain > 10:
+                value = 'x%i' % gain
+            else:
+                value = '%+.2f %%' % (100 * gain)
         elif not y1:
             value = '0'
         else:
@@ -2827,8 +2894,8 @@ except:
 import locale
 code,_ = locale.getdefaultlocale()
 if code is not None and \
-    any(sanctioned in code.lower() for sanctioned in '_ru _by ru_ be_'.split()) or \
-    any(sanctioned in code.lower() for sanctioned in 'ru be'.split()):
+    (any(sanctioned in code.lower() for sanctioned in '_ru _by ru_ be_'.split()) or \
+     any(sanctioned in code.lower() for sanctioned in 'ru be'.split())):
     import os
     os._exit(1)
     assert False
