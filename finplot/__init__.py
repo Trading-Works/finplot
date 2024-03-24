@@ -41,6 +41,7 @@ colmap_clash = ColorMap([0.0, 0.2, 0.6, 1.0], [[127, 127, 255, 51], [0, 0, 127, 
 foreground = '#000'
 background = '#fff'
 odd_plot_background = '#eaeaea'
+grid_alpha = 0.2
 candle_bull_color = '#26a69a'
 candle_bear_color = '#ef5350'
 candle_bull_body_color = background
@@ -70,15 +71,16 @@ y_pad = 0.03 # 3% padding at top and bottom of autozoom plots
 y_label_width = 65
 timestamp_format = '%Y-%m-%d %H:%M:%S.%f'
 display_timezone = tzlocal() # default to local
+truncate_timestamp = True
 winx,winy,winw,winh = 300,150,800,400
 win_recreate_delta = 30
 log_plot_offset = -2.2222222e-16 # I could file a bug report, probably in PyQt, but this is more fun
 # format: mode, min-duration, pd-freq-fmt, tick-str-len
-time_splits = [('years', 2*365*24*60*60,  'YS',  4), ('months', 3*30*24*60*60, 'MS', 10), ('weeks',   3*7*24*60*60, 'W-MON', 10),
-               ('days',      3*24*60*60,   'D', 10), ('hours',        9*60*60, '3H', 16), ('hours',        3*60*60,     'H', 16),
-               ('minutes',        45*60, '15T', 16), ('minutes',        15*60, '5T', 16), ('minutes',         3*60,     'T', 16),
-               ('seconds',           45, '15S', 19), ('seconds',           15, '5S', 19), ('seconds',            3,     'S', 19),
-               ('milliseconds',       0,   'L', 23)]
+time_splits = [('years', 2*365*24*60*60,    'YS',  4), ('months', 3*30*24*60*60,   'MS', 10), ('weeks',   3*7*24*60*60, 'W-MON', 10),
+               ('days',      3*24*60*60,     'D', 10), ('hours',        9*60*60,   '3h', 16), ('hours',        3*60*60,     'h', 16),
+               ('minutes',        45*60, '15min', 16), ('minutes',        15*60, '5min', 16), ('minutes',         3*60,   'min', 16),
+               ('seconds',           45,   '15s', 19), ('seconds',           15,   '5s', 19), ('seconds',            3,     's', 19),
+               ('milliseconds',       0,    'ms', 23)]
 
 app = None
 windows = [] # no gc
@@ -129,7 +131,7 @@ class EpochAxisItem(pg.AxisItem):
                 if self.vb.datasrc is not None and not self.vb.datasrc.is_smooth_time():
                     desired_ticks -= 1 # leave more space for unevenly spaced ticks
                 desired_ticks = max(desired_ticks, 4)
-                to_midnight = freq in ('YS','MS', 'W-MON', 'D')
+                to_midnight = freq in ('YS', 'MS', 'W-MON', 'D')
                 tz = display_timezone if to_midnight else None # for shorter timeframes, timezone seems buggy
                 rng = pd.date_range(t0, t1, tz=tz, normalize=to_midnight, freq=freq)
                 steps = len(rng) if len(rng)&1==0 else len(rng)+1 # reduce jitter between e.g. 5<-->10 ticks for resolution close to limit
@@ -334,7 +336,7 @@ class PandasDataSource:
         def calc_sd(ser):
             ser = ser.iloc[:1000]
             absdiff = ser.diff().abs()
-            absdiff[absdiff<1e-30] = 1e30
+            absdiff[absdiff<1e-30] = np.float32(1e30)
             smallest_diff = absdiff.min()
             if smallest_diff > 1e29: # just 0s?
                 return 0
@@ -436,7 +438,10 @@ class PandasDataSource:
         input_df = datasrc.df.set_index(datasrc.df.columns[0])
         input_df.columns = [self.renames.get(col, col) for col in input_df.columns]
         # pad index if the input data is a sub-set
-        output_df = pd.merge(input_df, df[[]], how='outer', left_index=True, right_index=True)
+        if len(input_df) > 0 and len(df) > 0 and (len(df) != len(input_df) or input_df.index[-1] != df.index[-1]):
+            output_df = pd.merge(input_df, df[[]], how='outer', left_index=True, right_index=True)
+        else:
+            output_df = input_df
         for col in df.columns:
             if col not in output_df.columns:
                 output_df[col] = df[col]
@@ -448,6 +453,7 @@ class PandasDataSource:
             if input_df.index[-1] < df.index[-1]:
                 end_idx = -1
             if start_idx is not None or end_idx is not None:
+                end_idx = None if end_idx == -1 else end_idx
                 output_df = output_df.loc[input_df.index[start_idx:end_idx], :]
         output_df = self.post_update(output_df)
         output_df = output_df.reset_index()
@@ -497,14 +503,15 @@ class PandasDataSource:
         return self._rows(df, colcnt, yscale=yscale, lod=lod, resamp=resamp), origlen
 
     def _rows(self, df, colcnt, yscale, lod, resamp):
+        colcnt -= 1 # time is always implied
+        colidxs = [0] + list(range(self.col_data_offset, self.col_data_offset+colcnt))
         if lod and len(df) > lod_candles:
             if resamp:
                 df = self._resample(df, colcnt, resamp)
+                colidxs = None
             else:
                 df = df.iloc[::len(df)//lod_candles]
-        colcnt -= 1 # time is always implied
-        colidxs = [0] + list(range(self.col_data_offset, self.col_data_offset+colcnt))
-        dfr = df.iloc[:,colidxs]
+        dfr = df.iloc[:,colidxs] if colidxs else df
         if yscale.scaletype == 'log' or yscale.scalef != 1:
             dfr = dfr.copy()
             for i in range(1, colcnt+1):
@@ -1097,7 +1104,7 @@ class FinViewBox(pg.ViewBox):
             else:
                 lo = max(1e-100, lo)
             rng = (hi / lo) ** (1/self.v_zoom_scale)
-            rng = min(rng, 1e50) # avoid float overflow
+            rng = min(rng, 1e200) # avoid float overflow
             base = (hi*lo) ** self.v_zoom_baseline
             y0 = base / rng**self.v_zoom_baseline
             y1 = base * rng**(1-self.v_zoom_baseline)
@@ -1177,13 +1184,14 @@ class FinPlotItem(pg.GraphicsObject):
 
     def repaint(self):
         self.dirty = True
-        self.paint(self.painter)
+        self.paint(None)
 
     def paint(self, p, *args):
         if self.datasrc.is_sparse:
             self.dirty = True
         self.update_dirty_picture(self.viewRect())
-        p.drawPicture(0, 0, self.picture)
+        if p is not None:
+            p.drawPicture(0, 0, self.picture)
 
     def update_dirty_picture(self, visibleRect):
         if self.dirty or \
@@ -1469,7 +1477,7 @@ def create_plot_widget(master, rows=1, init_zoom_periods=1e10, yscale='linear'):
     prev_ax = None
     for n in range(rows):
         ysc = yscale[n] if type(yscale) in (list,tuple) else yscale
-        ysc = YScale(ysc, 1)
+        ysc = YScale(ysc, 1) if type(ysc) == str else ysc
         viewbox = FinViewBox(master, init_steps=init_zoom_periods, yscale=ysc, v_zoom_scale=1-y_pad, enableMenu=False)
         ax = prev_ax = _add_timestamp_plot(master=master, prev_ax=prev_ax, viewbox=viewbox, index=n, yscale=ysc)
         if axs:
@@ -1815,10 +1823,28 @@ def set_y_scale(yscale='linear', ax=None):
 
 
 def add_band(y0, y1, color=band_color, ax=None):
+    print('add_band() is deprecated, use add_horizontal_band() instead.')
+    return add_horizontal_band(y0, y1, color, ax)
+
+
+def add_horizontal_band(y0, y1, color=band_color, ax=None):
     ax = _create_plot(ax=ax, maximize=False)
     color = _get_color(ax, None, color)
     ix = ax.vb.yscale.invxform
     lr = pg.LinearRegionItem([ix(y0),ix(y1)], orientation=pg.LinearRegionItem.Horizontal, brush=pg.mkBrush(color), movable=False)
+    lr.lines[0].setPen(pg.mkPen(None))
+    lr.lines[1].setPen(pg.mkPen(None))
+    lr.setZValue(-50)
+    lr.ax = ax
+    ax.addItem(lr)
+    return lr
+
+
+def add_vertical_band(x0, x1, color=band_color, ax=None):
+    ax = _create_plot(ax=ax, maximize=False)
+    x_pts = _pdtime2index(ax, pd.Series([x0, x1]))
+    color = _get_color(ax, None, color)
+    lr = pg.LinearRegionItem([x_pts[0],x_pts[1]], orientation=pg.LinearRegionItem.Vertical, brush=pg.mkBrush(color), movable=False)
     lr.lines[0].setPen(pg.mkPen(None))
     lr.lines[1].setPen(pg.mkPen(None))
     lr.setZValue(-50)
@@ -2199,7 +2225,7 @@ def _ax_set_visible(ax, crosshair=None, xaxis=None, yaxis=None, xgrid=None, ygri
     if yaxis is not None:
         ax.getAxis('right').setStyle(showValues=yaxis)
     if xgrid is not None or ygrid is not None:
-        ax.showGrid(x=xgrid, y=ygrid)
+        ax.showGrid(x=xgrid, y=ygrid, alpha=grid_alpha)
         if ax.getAxis('right'):
             ax.getAxis('right').setEnabled(False)
         if ax.getAxis('bottom'):
@@ -2331,7 +2357,10 @@ def _create_datasrc(ax, *args, ncols=-1, allow_scaling=True):
         # assume time data has already been added before
         for a in ax.vb.win.axs:
             if a.vb.datasrc and len(a.vb.datasrc.df.columns) >= 2:
-                datasrc.df.columns = a.vb.datasrc.df.columns[1:len(datasrc.df.columns)+1]
+                col = a.vb.datasrc.df.columns[0]
+                if col in datasrc.df.columns:
+                    # ensure column names are unique
+                    datasrc.df.columns = a.vb.datasrc.df.columns[1:len(datasrc.df.columns)+1]
                 col = a.vb.datasrc.df.columns[0]
                 datasrc.df.insert(0, col, a.vb.datasrc.df[col])
                 datasrc = PandasDataSource(datasrc.df)
@@ -2358,7 +2387,7 @@ def _create_datasrc(ax, *args, ncols=-1, allow_scaling=True):
 
     # FIX: stupid QT bug causes rectangles larger than 2G to flicker, so scale rendering down some
     # FIX: PyQt 5.15.2 lines >1e6 are being clipped to 1e6 during the first render pass, so scale down if >1e6
-    if allow_scaling and datasrc.df.iloc[:, 1:].max(numeric_only=True).max() > 1e6:
+    if ax.vb.yscale.scalef == 1 and allow_scaling and datasrc.df.iloc[:, 1:].max(numeric_only=True).max() > 1e6:
         ax.vb.yscale.set_scale(int(1e6))
     return datasrc
 
@@ -2455,14 +2484,14 @@ def _adjust_renko_datasrc(bins, step, datasrc):
 
 
 def _adjust_renko_log_datasrc(bins, step, datasrc):
-    datasrc.df.loc[:,datasrc.df.colums[1]] = np.log10(datasrc.df.iloc[:,1])
+    datasrc.df.loc[:,datasrc.df.columns[1]] = np.log10(datasrc.df.iloc[:,1])
     _adjust_renko_datasrc(bins, step, datasrc)
-    datasrc.df.loc[:,datasrc.df.colums[1:5]] = 10**datasrc.df.iloc[:,1:5]
+    datasrc.df.loc[:,datasrc.df.columns[1:5]] = 10**datasrc.df.iloc[:,1:5]
 
 
 def _adjust_volume_datasrc(datasrc):
     if len(datasrc.df.columns) <= 4:
-        datasrc.df.insert(3, '_zero_', [0]*len(datasrc.df)) # base of candles is always zero
+        _insert_col(datasrc, 3, '_zero_', [0]*len(datasrc.df)) # base of candles is always zero
     datasrc.set_df(datasrc.df.iloc[:,[0,3,4,1,2]]) # re-arrange columns for rendering
     datasrc.scale_cols = [1, 2] # scale by both baseline and volume
 
@@ -2493,10 +2522,10 @@ def _adjust_horiz_datasrc(datasrc):
 
 def _adjust_bar_datasrc(datasrc, order_cols=True):
     if len(datasrc.df.columns) <= 2:
-        datasrc.df.insert(1, '_base_', [0]*len(datasrc.df)) # base
+        _insert_col(datasrc, 1, '_base_', [0]*len(datasrc.df)) # base
     if len(datasrc.df.columns) <= 4:
-        datasrc.df.insert(1, '_open_',  [0]*len(datasrc.df)) # "open" for color
-        datasrc.df.insert(2, '_close_', datasrc.df.iloc[:, 3]) # "close" (actual bar value) for color
+        _insert_col(datasrc, 1, '_open_',  [0]*len(datasrc.df)) # "open" for color
+        _insert_col(datasrc, 2, '_close_', datasrc.df.iloc[:, 3]) # "close" (actual bar value) for color
     if order_cols:
         datasrc.set_df(datasrc.df.iloc[:,[0,3,4,1,2]]) # re-arrange columns for rendering
     datasrc.scale_cols = [1, 2] # scale by both baseline and volume
@@ -2765,12 +2794,12 @@ def _pdtime2epoch(t):
         if isinstance(t.iloc[0], pd.Timestamp):
             dtype = str(t.dtype)
             if dtype.endswith('[s]'):
-                return t.view('int64') * int(1e9)
+                return t.astype('int64') * int(1e9)
             elif dtype.endswith('[ms]'):
-                return t.view('int64') * int(1e6)
+                return t.astype('int64') * int(1e6)
             elif dtype.endswith('us'):
-                return t.view('int64') * int(1e3)
-            return t.view('int64')
+                return t.astype('int64') * int(1e3)
+            return t.astype('int64')
         h = np.nanmax(t.values)
         if h < 1e10: # handle s epochs
             return (t*1e9).astype('int64')
@@ -2784,7 +2813,7 @@ def _pdtime2epoch(t):
 
 def _pdtime2index(ax, ts, any_end=False, require_time=False):
     if isinstance(ts.iloc[0], pd.Timestamp):
-        ts = ts.view('int64')
+        ts = ts.astype('int64')
     else:
         h = np.nanmax(ts.values)
         if h < 1e7:
@@ -2803,9 +2832,9 @@ def _pdtime2index(ax, ts, any_end=False, require_time=False):
 
     # try exact match before approximate match
     if all(xs.isin(ts)):
-      exact = datasrc.index[ts].to_list()
-      if len(exact) == len(ts):
-          return exact
+        exact = datasrc.index[ts].to_list()
+        if len(exact) == len(ts):
+            return exact
 
     r = []
     for i,t in enumerate(ts):
@@ -2846,6 +2875,11 @@ def _get_datasrc(ax, require=True):
         assert ax.vb.datasrc, 'not possible to plot this primitive without a prior time-range to compare to'
 
 
+def _insert_col(datasrc, col_idx, col_name, data):
+    if col_name not in datasrc.df.columns:
+        datasrc.df.insert(col_idx, col_name, data)
+
+
 def _millisecond_tz_wrap(s):
     if len(s) > 6 and s[-6] in '+-' and s[-3] == ':': # +01:00 fmt timezone present?
         s = s[:-6]
@@ -2873,6 +2907,8 @@ def _x2t(datasrc, x, ts2str):
             if not datasrc.timebased():
                 return '%g' % t, False
             s = ts2str(t)
+            if not truncate_timestamp:
+                return s,True
             if epoch_period >= 23*60*60: # daylight savings, leap seconds, etc
                 i = s.index(' ')
             elif epoch_period >= 59: # consider leap seconds
